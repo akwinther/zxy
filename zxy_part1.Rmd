@@ -9,3 +9,85 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+#Introduction
+
+In this post we'll do some basic data vizualization using the ZXY data from Pettersen et al 2014. 
+
+```{r echo=FALSE, message=FALSE}
+library(ggplot2)
+install.packages("ggforce")
+library(ggforce)
+library(dplyr)
+```
+
+The data can easily be imported by typing the followig code:
+```{r}
+df <- read.csv("http://home.ifi.uio.no/paalh/dataset/alfheim/2013-11-28/zxy/2013-11-28_tromso_tottenham_raw.csv", header = FALSE)
+```
+
+Let's start by changing the names of the variables, and adding a column with the time elapsed in seconds.
+```{r}
+names(df) <- c("timestamp", "tag_id", "x_pos", "y_pos", "heading", "direction", "energy", "speed", "total_distance")
+
+options(digits.secs = 6)
+df$timestamp <- as.POSIXct(df$timestamp,format = "%Y-%m-%d %H:%M:%OS")
+df$seconds <- as.numeric(df$timestamp - min(df$timestamp))
+```
+
+For the pitch I used code from Joe Gallagher's soccermatics package.
+```{r}
+pitchBG <- function(lengthPitch = 105, widthPitch = 68, fill = "white", colour = "dimgrey", size = 1) 
+  {
+  ggplot() +
+  # perimeter line
+  geom_rect(aes(xmin = 0, xmax = lengthPitch, ymin = 0, ymax = widthPitch), fill = fill, colour = colour, size = 1) +
+  # centre circle
+  geom_circle(aes(x0 = lengthPitch/2, y0 = widthPitch/2, r = 9.15), colour = colour, size = 1) +
+  # kick off spot
+  geom_circle(aes(x0 = lengthPitch/2, y0 = widthPitch/2, r = 0.25), fill = fill, colour = colour, size = 1) +
+  # halfway line
+  geom_segment(aes(x = lengthPitch/2, y = 0, xend = lengthPitch/2, yend = widthPitch), colour = colour, size = 1) + # penalty arcs
+  geom_arc(aes(x0 = 11, y0 = widthPitch/2, r = 9.15, start = 0.65, end = 2.49), colour = colour, size = 1) +
+  geom_arc(aes(x0 = lengthPitch - 11, y0 = widthPitch/2, r = 9.15, start = 3.79, end = 5.63), colour = colour, size = 1) +
+  # penalty areas
+  geom_rect(aes(xmin = 0, xmax = 16.5, ymin = widthPitch/2 - 20.15, ymax = widthPitch/2 + 20.15), fill = NA, colour = colour, size = 1) +
+  geom_rect(aes(xmin = lengthPitch - 16.5, xmax = lengthPitch, ymin = widthPitch/2 - 20.15, ymax = widthPitch/2 + 20.15), fill = NA, colour = colour, size = 1) +
+  # penalty spots
+  geom_circle(aes(x0 = 11, y0 = widthPitch/2, r = 0.25), fill = colour, col = colour, size = 1) +
+  geom_circle(aes(x0 = lengthPitch - 11, y0 = widthPitch/2, r = 0.25), fill = colour, colour = colour, size = 1) +
+  # six yard boxes
+  geom_rect(aes(xmin = 0, xmax = 5.5, ymin = (widthPitch/2) - 9.16, ymax = (widthPitch/2) + 9.16), fill = NA, colour = colour, size = 1) +
+  geom_rect(aes(xmin = lengthPitch - 5.5, xmax = lengthPitch, ymin = (widthPitch/2) - 9.16, ymax = (widthPitch/2) + 9.16), fill = NA, colour = colour, size = 1) +
+  # goals
+  geom_rect(aes(xmin = -2, xmax = 0, ymin = (widthPitch/2) - 3.66, ymax = (widthPitch/2) + 3.66), fill = NA, colour = colour, size = 1) +
+  geom_rect(aes(xmin = lengthPitch, xmax = lengthPitch + 2, ymin = (widthPitch/2) - 3.66, ymax = (widthPitch/2) + 3.66), fill = NA, colour = colour, size = 1) +
+  coord_fixed() +
+  xlab("") +
+  ylab("")
+  }
+pitchBG()
+```
+
+
+```{r}
+avg_positions <- df %>% 
+  group_by(tag_id) %>%
+  summarise(avg_x = mean(x_pos),
+            avg_y = mean(y_pos),
+            distance = max(total_distance))
+
+pitchBG() +
+  geom_point(aes(avg_x, avg_y),
+             data = avg_positions,
+             fill = "red", 
+             shape = 21,
+             size = 7) +
+  geom_text(aes(avg_x, avg_y, label = tag_id), data = avg_positions, colour = "white", fontface = "bold", size = 3)
+```
+The graph shows the average position corresponding to each tag id. As showed 9 tags are outfield players, while 5 look like substitute. Furthermore, by looking "avg_positions" we can see that they haven't run as much either. Using this information we can create a lookup table and name the positions to our dataframe.
+```{r}
+positionsLookup <- c(2 = "RB", 4 = "RCB", 14 = "LCB", 1 = "LB", 8 = "RM", 11 = "RCM", 6 = "LM", 5 = "ST", 12 = "FW")
+
+df$position <- positionsLookup[df$tag_id]
+```
+
