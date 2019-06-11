@@ -18,6 +18,7 @@ library(ggplot2)
 install.packages("ggforce")
 library(ggforce)
 library(dplyr)
+library(zoo)
 ```
 
 The data can easily be imported by typing the followig code:
@@ -32,6 +33,28 @@ names(df) <- c("timestamp", "tag_id", "x_pos", "y_pos", "heading", "direction", 
 options(digits.secs = 6)
 df$timestamp <- as.POSIXct(df$timestamp,format = "%Y-%m-%d %H:%M:%OS")
 df$seconds <- as.numeric(df$timestamp - min(df$timestamp))
+
+df <- df %>%
+  group_by(tag_id) %>%
+  mutate(distance = (sqrt((x_pos - lag(x_pos))^2 + (y_pos - lag(y_pos))^2)),
+         speed_km.h = (speed * 3.6), 
+         hir_distance = (cumsum(ifelse(speed_km.h >=19.8 & speed_km.h <= 25.2, distance, 0))),
+         sprint_distance = (cumsum(ifelse(speed_km.h > 25.2, distance, 0))),
+         acceleration = c(NA, diff(speed)/diff(seconds)),
+         accel_moderate = (ifelse(acceleration >= 2 & acceleration <= 4, acceleration, 0)),
+         accel_high = (ifelse(acceleration > 4, acceleration, 0)),
+         decel_moderate = (ifelse(acceleration <=-2 & acceleration >=-4, acceleration, 0)),
+         decel_high = (ifelse(acceleration < -4, acceleration, 0)))
+
+df_stats <- df %>%
+  group_by(tag_id, position) %>%
+  summarise(total_distance = max(total_distance),
+            sprint_counts = sum(rle(speed_km.h > 25.2)$values, na.rm = TRUE),
+            hir_counts = sum(rle(speed_km.h >=19.8 & speed_km.h <= 25.2)$values, na.rm = TRUE),
+            accel_mod_counts = sum(rle(acceleration >= 2 & acceleration <= 4)$values, na.rm = TRUE),
+            accel_high_counts = sum(rle(acceleration > 4)$values, na.rm = TRUE),
+            decel_mod_counts = sum(rle(acceleration <=-2 & acceleration >=-4)$values, na.rm = TRUE),
+            decel_high_counts = sum(rle(acceleration < -4)$values, na.rm = TRUE))
 ```
 
 For the pitch I used code from Joe Gallagher's soccermatics package.
@@ -86,8 +109,64 @@ pitchBG() +
 ```
 The graph shows the average position corresponding to each tag id. As showed 9 tags are outfield players, while 5 look like substitute. Furthermore, by looking "avg_positions" we can see that they haven't run as much either. Using this information we can create a lookup table and name the positions to our dataframe.
 ```{r}
-positionsLookup <- c(2 = "RB", 4 = "RCB", 14 = "LCB", 1 = "LB", 8 = "RM", 11 = "RCM", 6 = "LM", 5 = "ST", 12 = "FW")
+positionsLookup <- c("2" = "RB", "4" = "RCB", "14" = "LCB", "1" = "LB", "8" = "RM", "11" = "RCM", "6" = "LM", "5" = "ST", "12" = "FW", "9" = "Sub1", "10" = "Sub2", "7" = "Sub3", "13" = "Sub4", "3" = "Sub5")
 
-df$position <- positionsLookup[df$tag_id]
+df$position <- positionsLookup[as.character(df$tag_id)]
+
+starters <- df %>%
+  group_by(position) %>%
+  filter(max(total_distance) > 1000)
 ```
 
+```{r}
+speedPlot <- ggplot(starters, aes(x = seconds, y = speed_km.h)) +
+  geom_path() +
+  theme_minimal() +
+  facet_wrap(~ position, ncol = 3)
+speedPlot
+```
+
+
+
+```{r}
+boxPlots <- ggplot(starters, aes(x = position, y = speed_km.h)) +
+  geom_boxplot() +
+  theme_minimal()
+boxPlots
+```
+
+```{r}
+outliers <- boxplot(starters$speed_km.h, plot = FALSE)$out
+outliers
+```
+
+
+
+
+
+
+
+```{r}
+speedHisto <- ggplot(starters, aes(speed_km.h)) +
+  geom_histogram(binwidth = 1) +
+  theme_minimal() +
+  facet_wrap(~ position, ncol = 3)
+speedHisto
+```
+Let's calculate acceleration:
+```{r}
+startersCleaned <- starters
+startersCleaned$speed <- replace(startersCleaned$speed, startersCleaned$speed == 0, NA)
+
+startersCleaned <- startersCleaned %>%
+  group_by(position) %>%
+  mutate(acceleration = c(NA, diff(speed)/diff(seconds)))
+
+accelPlot <- ggplot(startersCleaned, aes(x = seconds, y = acceleration)) +
+  geom_path() +
+  theme_classic() +
+  facet_wrap(~ position, ncol = 3)
+accelPlot
+```
+```{r}
+rle(startersCleaned$speed > 9)
