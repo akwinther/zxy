@@ -44,17 +44,68 @@ df <- df %>%
          accel_moderate = (ifelse(acceleration >= 2 & acceleration <= 4, acceleration, 0)),
          accel_high = (ifelse(acceleration > 4, acceleration, 0)),
          decel_moderate = (ifelse(acceleration <=-2 & acceleration >=-4, acceleration, 0)),
-         decel_high = (ifelse(acceleration < -4, acceleration, 0)))
+         decel_high = (ifelse(acceleration < -4, acceleration, 0)),
+         vectorCompX = c(NA,diff(x_pos)),
+         vectorCompY = c(NA, diff(y_pos)),
+         vectorLength = sqrt((vectorCompX^2) + (vectorCompY^2)),
+         prodVectorLength = vectorLength * lead(vectorLength),
+         dotProd = vectorCompX * lead(vectorCompX) + vectorCompY * lead(vectorCompY),
+         angularDisp = rad2deg(acos(dotProd/prodVectorLength)),
+         angularVelocity = abs(c(NA, diff(angularDisp)/diff(seconds)))) %>%
+  arrange(tag_id)
 
-df_stats <- df %>%
+rad2deg <- function(rad) {(rad * 180) / (pi)}
+
+df_cleaned <- df %>%
+  filter(speed_km.h < 37 & acceleration < 6 & acceleration > -6 & angularVelocity < 360) 
+
+outliers <- subset(df, speed_km.h > 37 | angularVelocity > 360 | acceleration > 6 | acceleration < -6 )
+
+df_stats <- df_cleaned %>%
   group_by(tag_id, position) %>%
   summarise(total_distance = max(total_distance),
-            sprint_counts = sum(rle(speed_km.h > 25.2)$values, na.rm = TRUE),
+            sprint_counts = sum(rle(speed_km.h > 25.2)$values, na.rm = FALSE),
             hir_counts = sum(rle(speed_km.h >=19.8 & speed_km.h <= 25.2)$values, na.rm = TRUE),
             accel_mod_counts = sum(rle(acceleration >= 2 & acceleration <= 4)$values, na.rm = TRUE),
-            accel_high_counts = sum(rle(acceleration > 4)$values, na.rm = TRUE),
+            accel_high_counts = sum(rle(acceleration > 4)$values, na.rm = FALSE),
             decel_mod_counts = sum(rle(acceleration <=-2 & acceleration >=-4)$values, na.rm = TRUE),
             decel_high_counts = sum(rle(acceleration < -4)$values, na.rm = TRUE))
+
+player1 <- df_cleaned[df_cleaned$tag_id == "1",]
+
+ggplot(data = player1,
+ aes(x = seconds, y = acceleration, color = acceleration)) +
+ geom_point() +
+ scale_colour_gradientn(colours = rainbow(7)) +
+ xlab("\n Time (s)") +
+ ylab(expression(Velocity ~ (m.s^-1))) +
+ scale_x_continuous(limits = c(200, 2000), expand = c(0, 0), breaks = seq(200, 2000, by = 200)) +
+  scale_y_continuous() +
+ theme_classic() +
+ theme(legend.position = "none") #+ 
+  facet_wrap(tag_id ~ .)
+
+# Perform k-means clustering on the angular velocity column
+# First place the column into a matrix
+matrixAngularVelocity <- as.matrix(df_cleaned$angularVelocity[!is.na(df_cleaned$angularVelocity)], ncol=1)
+# Declare the number of clusters, for example, four groups of velocity
+nAngularVelocityClusters <- 4
+# Ensure the initial cluster points are held constant
+set.seed(1)
+# Obtain the kMeans cluster
+AngularVelocityClusters <- kmeans(matrixAngularVelocity[,1], nAngularVelocityClusters)
+# To obtain the centers, size and within cluster sum of squares
+AngularVelocityClusters$centers
+AngularVelocityClusters$size
+AngularVelocityClusters$withinss
+
+AngularVelocityCluster_df <- data.frame(AngularVelocityClusters$cluster)
+colnames(AngularVelocityCluster_df) <- "Cluster"
+AngularVelocityCluster_df$Notational <- factor(AngularVelocityCluster_df$Cluster, levels = c(1,2,3,4,5), labels = c("45", "Straight", "Curved", "U-turn", "90"))
+
+#levels = c(1,2,3,4,5), labels = c("45", "Straight", "Curved", "U-turn", "90"))                                               
+#levels = c(1,2,3,4), labels = c("65", "U-turn", "Curved", "Straight"))   
+  
 ```
 
 For the pitch I used code from Joe Gallagher's soccermatics package.
