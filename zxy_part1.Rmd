@@ -47,7 +47,7 @@ df <- df %>%
          decel_high = (ifelse(acceleration < -4, acceleration, 0)),
          vectorCompX = c(NA,diff(x_pos)),
          vectorCompY = c(NA, diff(y_pos)),
-         vectorLength = sqrt((vectorCompX^2) + (vectorCompY^2)),
+         vectorLength = sqrt(((vectorCompX^2) + (vectorCompY^2))),
          prodVectorLength = vectorLength * lead(vectorLength),
          dotProd = vectorCompX * lead(vectorCompX) + vectorCompY * lead(vectorCompY),
          angularDisp = rad2deg(acos(dotProd/prodVectorLength)),
@@ -57,55 +57,125 @@ df <- df %>%
 rad2deg <- function(rad) {(rad * 180) / (pi)}
 
 df_cleaned <- df %>%
-  filter(speed_km.h < 37 & acceleration < 6 & acceleration > -6 & angularVelocity < 360) 
+  filter(!is.na(angularDisp) & !is.na(angularVelocity) & speed_km.h < 37 & acceleration < 6 & acceleration > -6) # & angularVelocity < 225 ) 
 
-outliers <- subset(df, speed_km.h > 37 | angularVelocity > 360 | acceleration > 6 | acceleration < -6 )
+outliers <- subset(df, speed_km.h > 37 | angularVelocity > 270 | acceleration > 6 | acceleration < -6)
 
 df_stats <- df_cleaned %>%
   group_by(tag_id, position) %>%
   summarise(total_distance = max(total_distance),
-            sprint_counts = sum(rle(speed_km.h > 25.2)$values, na.rm = FALSE),
+            sprint_distance = max(sprint_distance),
+            sprint_counts = sum(rle(speed_km.h > 25.2)$values, na.rm = TRUE),
             hir_counts = sum(rle(speed_km.h >=19.8 & speed_km.h <= 25.2)$values, na.rm = TRUE),
             accel_mod_counts = sum(rle(acceleration >= 2 & acceleration <= 4)$values, na.rm = TRUE),
-            accel_high_counts = sum(rle(acceleration > 4)$values, na.rm = FALSE),
+            accel_high_counts = sum(rle(acceleration > 4)$values, na.rm = TRUE),
             decel_mod_counts = sum(rle(acceleration <=-2 & acceleration >=-4)$values, na.rm = TRUE),
             decel_high_counts = sum(rle(acceleration < -4)$values, na.rm = TRUE))
 
+#specific player datasets
 player1 <- df_cleaned[df_cleaned$tag_id == "1",]
 
+accCounter <- function(z,x,y) {
+  count <- vector("numeric", length = length(z))
+  for (i in 1:length(z)) {
+    if (z[i] >= x) {count[i] = 1}
+  }
+  countDf <-data.frame("values" = rle(count)$values, "lengths" = rle(count)$lengths)
+  countThreshold <- countDf[countDf$values == 1,]
+  count0.5 <- countThreshold[countThreshold$lengths >= y,]
+  return(sum(count0.5$values))
+}
+
+accCounter(player1$acceleration, 2, 20)
+
+
+
+player1_200_380 <- player1[player1$seconds >200 & player1$seconds < 380,]
+
 ggplot(data = player1,
- aes(x = seconds, y = acceleration, color = acceleration)) +
- geom_point() +
+ aes(x = seconds, y = angularVelocity, color = angularVelocity)) +
+ geom_line() +
  scale_colour_gradientn(colours = rainbow(7)) +
  xlab("\n Time (s)") +
  ylab(expression(Velocity ~ (m.s^-1))) +
- scale_x_continuous(limits = c(200, 2000), expand = c(0, 0), breaks = seq(200, 2000, by = 200)) +
+ scale_x_continuous(limits = c(200, 380), expand = c(0, 0), breaks = seq(200, 380, by = 20)) +
   scale_y_continuous() +
  theme_classic() +
  theme(legend.position = "none") #+ 
   facet_wrap(tag_id ~ .)
 
-# Perform k-means clustering on the angular velocity column
-# First place the column into a matrix
-matrixAngularVelocity <- as.matrix(df_cleaned$angularVelocity[!is.na(df_cleaned$angularVelocity)], ncol=1)
-# Declare the number of clusters, for example, four groups of velocity
-nAngularVelocityClusters <- 4
-# Ensure the initial cluster points are held constant
-set.seed(1)
-# Obtain the kMeans cluster
-AngularVelocityClusters <- kmeans(matrixAngularVelocity[,1], nAngularVelocityClusters)
-# To obtain the centers, size and within cluster sum of squares
-AngularVelocityClusters$centers
-AngularVelocityClusters$size
-AngularVelocityClusters$withinss
+clusters <- function(x,y) {
+  clusterMatrix <- as.matrix(x[!is.na(x)], ncol = 1)
+  nClusters <- y
+  set.seed(1)
+  k.clusters <- kmeans(clusterMatrix[,1], nClusters)
+  return(k.clusters)
+}  
 
-AngularVelocityCluster_df <- data.frame(AngularVelocityClusters$cluster)
-colnames(AngularVelocityCluster_df) <- "Cluster"
-AngularVelocityCluster_df$Notational <- factor(AngularVelocityCluster_df$Cluster, levels = c(1,2,3,4,5), labels = c("45", "Straight", "Curved", "U-turn", "90"))
+accelClusters <- clusters(df_cleaned$acceleration, 3) 
+accelClusters$centers
 
-#levels = c(1,2,3,4,5), labels = c("45", "Straight", "Curved", "U-turn", "90"))                                               
-#levels = c(1,2,3,4), labels = c("65", "U-turn", "Curved", "Straight"))   
-  
+# Add the cluster data info back into the dummy data
+df_cleaned$accelCluster <- accelClusters$cluster
+df_cleaned$accelNotational <- factor(accelClusters$cluster, levels = 1:length(accelClusters$centers), labels = c("Acceleration", "Neutral", "Deceleration")) #c(as.character(round(accelClusters$centers, 1))))
+
+
+
+#specific player datasets
+player1 <- df_cleaned[df_cleaned$tag_id == "1",]
+player1_200_380 <- player1[player1$seconds >200 & player1$seconds < 380,]
+
+# Create a new column, based on "Centers" data.frame
+ggplot(data = df_cleaned, aes(x = NotationalDescriptor, fill = NotationalDescriptor)) +
+geom_bar(colour = "black", size = 1) +
+xlab("\n Notational Descriptor") +
+ylab("Count \n") +
+scale_y_continuous() +
+theme_classic() +
+theme(legend.position = "none")
+
+# Plot based on the notational descriptor
+ggplot(data = player1, aes(x = seconds, y = angularDisp, color = NotationalDescriptor, group = 1)) +
+geom_line() +
+scale_color_manual(values = c("green", "red", "black", "blue")) + 
+xlab("\n Time (s)") +
+ylab(expression(Velocity ~ (m.s^-1))) +
+scale_x_continuous(limits = c(200, 380), breaks = seq(200, 380, by = 20)) +
+scale_y_continuous() +
+# The line of code below changes the legend heading, when we wish to add a space between words
+labs(colour = 'Notational Descriptor') +
+theme_classic() +
+theme(legend.position = "bottom")  
+
+ggplot(player1_200_380) +
+  geom_segment(aes(x = 105, y = 0, xend = 105, yend = Inf)) +
+  geom_segment(aes(x = 105/2, y = 0, xend = 105/2, yend = Inf)) +
+  geom_segment(aes(x = 40, xend = 105, y = 0, yend = 0)) +
+  geom_segment(aes(x = 105 - 16.5, xend = 105, y = 68/2 - 20.15, yend = 68/2 - 20.15)) +
+  geom_segment(aes(x = 105 - 16.5, xend = 105 - 16.5, y = 68/2 - 20.15, yend = Inf)) +
+  geom_segment(aes(x = 105 - 5.5, xend = 105, y = 68/2 - 9.16, yend = 68/2 - 9.16)) +
+  geom_segment(aes(x = 105 - 5.5, xend = 105 - 5.5, y = 68/2 - 9.16, yend = Inf)) +
+  #geom_path(aes(x = x_pos, y = y_pos, color = angularDisp)) +
+  geom_path(aes(x = x_pos, y = y_pos, color = NotationalDescriptor, group = 1)) +
+  scale_color_manual(values = c("green", "red", "black", "blue")) +
+  #scale_color_gradientn(colors = rainbow(7)) +
+  scale_x_continuous(limits = c(40,105)) +
+  coord_fixed() +
+  theme_classic() + 
+  theme(plot.background = element_blank(), 
+        legend.position="bottom", 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        axis.line = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks = element_blank(), 
+        axis.title.x = element_blank(), 
+        axis.title.y = element_blank())
+
+
+
+
 ```
 
 For the pitch I used code from Joe Gallagher's soccermatics package.
