@@ -16,6 +16,7 @@ In this post we'll do some basic data vizualization using the ZXY data from Pett
 ```{r echo=FALSE, message=FALSE}
 library(ggplot2)
 install.packages("ggforce")
+install.packages("Rcpp")
 library(ggforce)
 library(dplyr)
 library(zoo)
@@ -75,25 +76,83 @@ df_stats <- df_cleaned %>%
 #specific player datasets
 player1 <- df_cleaned[df_cleaned$tag_id == "1",]
 
-accCounter <- function(z,x,y) {
-  count <- vector("numeric", length = length(z))
-  for (i in 1:length(z)) {
-    if (z[i] >= x) {count[i] = 1}
+accCounter <- function(acceleration, accThreshold, timestamp, timeThreshold) {
+  accVector <- vector("numeric", length = length(acceleration))
+  for (i in 1:length(acceleration)) {
+    if (acceleration[i] >= accThreshold) {
+      accVector[i] = 1
+    }
   }
-  countDf <-data.frame("values" = rle(count)$values, "lengths" = rle(count)$lengths)
-  countThreshold <- countDf[countDf$values == 1,]
-  count0.5 <- countThreshold[countThreshold$lengths >= y,]
-  return(sum(count0.5$values))
+  accIndex <- rle(accVector)
+  accelIndexes <- cumsum(accIndex$lengths)
+  if (length(accelIndexes) %% 2 == 1) {
+    accelIndexes <- c(accelIndexes, accelIndexes[length(accelIndexes)])
+  }
+  accStart <- accelIndexes[seq(from = 1, to = length(accelIndexes), by = 2)]
+  accEnd <- accelIndexes[seq(from = 2, to = length(accelIndexes), by = 2)]
+  accStartStamp <- timestamp[accStart]
+  accEndStamp <- timestamp[accEnd]
+  accTimeDiff <- accEndStamp - accStartStamp
+  return(sum(accTimeDiff >= timeThreshold))
 }
 
-accCounter(player1$acceleration, 2, 20)
+  
+player1accs <- accCounter(player1$acceleration, 2, player1$timestamp, 0.5)  
+player1accs  
+  
+
+accDistance <- function(acceleration, accThreshold, timestamp, distance, timeThreshold) {
+  accVector <- vector("numeric", length = length(acceleration))
+  for (i in 1:length(acceleration)) {
+    if (acceleration[i] >= accThreshold) {
+      accVector[i] = 1
+    }
+  }
+  accIndex <- rle(accVector)
+  accelIndexes <- cumsum(accIndex$lengths)
+  if (length(accelIndexes) %% 2 == 1) {
+    accelIndexes <- c(accelIndexes, accelIndexes[length(accelIndexes)])
+  }
+  accStart <- accelIndexes[seq(from = 1, to = length(accelIndexes), by = 2)]
+  accEnd <- accelIndexes[seq(from = 2, to = length(accelIndexes), by = 2)]
+  accStartStamp <- timestamp[accStart]
+  accEndStamp <- timestamp[accEnd]
+  accDistStartStamp <- distance[accStart]
+  accDistEndStamp <- distance[accEnd]
+  accTimeDiff <- accEndStamp - accStartStamp
+  accDistDiff <- accDistEndStamp - accDistStartStamp
+  return(sum(accDistDiff[accTimeDiff >= timeThreshold]))
+}
+
+accDistanceP1 <- accDistance(player1$acceleration, 2, player1$timestamp, player1$total_distance, 0.5)
+
+vecHirDistance <- vector("numeric", length = length(player1$speed_km.h))
+for (i in 1:length(player1$total_distance)) {
+    if (player1$speed_km.h[i] >= 19.8 & player1$speed_km.h[i] <= 25.2) {
+      vecHirDistance[i] = 1
+    }
+}
+
+hirIndex <- rle(vecHirDistance)
+hirIndexes <- cumsum(hirIndex$lengths)
+  if (length(hirIndexes) %% 2 == 1) {
+    hirIndexes <- c(hirIndexes, hirIndexes[length(hirIndexes)])
+  }
+  hirStart <- hirIndexes[seq(from = 1, to = length(hirIndexes), by = 2)]
+  hirEnd <- hirIndexes[seq(from = 2, to = length(hirIndexes), by = 2)]
+  hirStartDist <- player1$total_distance[hirStart]
+  hirEndDist <- player1$total_distance[hirEnd]
+  hirDistanceRun <- hirEndDist - hirStartDist
+  sum(hirDistanceRun >= 36 & hirDistanceRun <= 40)
+
+
 
 
 
 player1_200_380 <- player1[player1$seconds >200 & player1$seconds < 380,]
 
 ggplot(data = player1,
- aes(x = seconds, y = angularVelocity, color = angularVelocity)) +
+ aes(x = seconds, y = speed_km.h, color = speed_km.h)) +
  geom_line() +
  scale_colour_gradientn(colours = rainbow(7)) +
  xlab("\n Time (s)") +
