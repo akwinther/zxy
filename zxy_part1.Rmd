@@ -3,6 +3,8 @@ title: "Working with ZXY data part 1"
 author: "Andreas K. Winther"
 date: "5/28/2019"
 output: html_document
+bibliography: references.bib
+csl: apa.csl
 ---
 
 ```{r setup, include=FALSE}
@@ -11,20 +13,20 @@ knitr::opts_chunk$set(echo = TRUE)
 
 #Introduction
 
-In this post we'll do some basic data vizualization using the ZXY data from Pettersen et al 2014. 
+In this post we'll calculate some basic tracking metrics using the ZXY data from Pettersen et al 2014. 
 
 ```{r echo=FALSE, message=FALSE}
-library(ggplot2)
-install.packages("ggforce")
-install.packages("Rcpp")
+install.packages("Rcpp", repos = "http://cran.us.r-project.org")
+install.packages("ggforce", repos = "http://cran.us.r-project.org")
 library(ggforce)
 library(dplyr)
 library(zoo)
+library(ggplot2)
 ```
 
 The data can easily be imported by typing the followig code:
 ```{r}
-df <- read.csv("http://home.ifi.uio.no/paalh/dataset/alfheim/2013-11-28/zxy/2013-11-28_tromso_tottenham_raw.csv", header = FALSE)
+df <- read.csv("http://home.ifi.uio.no/paalh/dataset/alfheim/2013-11-03/zxy/2013-11-03_tromso_stromsgodset_first.csv", header = FALSE)
 ```
 
 Let's start by changing the names of the variables, and adding a column with the time elapsed in seconds.
@@ -33,78 +35,59 @@ names(df) <- c("timestamp", "tag_id", "x_pos", "y_pos", "heading", "direction", 
 
 options(digits.secs = 6)
 df$timestamp <- as.POSIXct(df$timestamp,format = "%Y-%m-%d %H:%M:%OS")
-df$seconds <- as.numeric(df$timestamp - min(df$timestamp))
+#df$seconds <- as.numeric(df$timestamp - min(df$timestamp))
+```
 
+We are also going to add some common tracking metrics, namely cumulative high-intensity distance, cumulative sprint distance, and acceleration. 
+
+```{r}
 df <- df %>%
   group_by(tag_id) %>%
   mutate(distance = (sqrt((x_pos - lag(x_pos))^2 + (y_pos - lag(y_pos))^2)),
-         speed_km.h = (speed * 3.6), 
+         speed_km.h = (speed * 3.6),
          hir_distance = (cumsum(ifelse(speed_km.h >=19.8 & speed_km.h <= 25.2, distance, 0))),
          sprint_distance = (cumsum(ifelse(speed_km.h > 25.2, distance, 0))),
-         acceleration = c(NA, diff(speed)/diff(seconds)),
-         accel_moderate = (ifelse(acceleration >= 2 & acceleration <= 4, acceleration, 0)),
-         accel_high = (ifelse(acceleration > 4, acceleration, 0)),
-         decel_moderate = (ifelse(acceleration <=-2 & acceleration >=-4, acceleration, 0)),
-         decel_high = (ifelse(acceleration < -4, acceleration, 0)),
-         vectorCompX = c(NA,diff(x_pos)),
-         vectorCompY = c(NA, diff(y_pos)),
-         vectorLength = sqrt(((vectorCompX^2) + (vectorCompY^2))),
-         prodVectorLength = vectorLength * lead(vectorLength),
-         dotProd = vectorCompX * lead(vectorCompX) + vectorCompY * lead(vectorCompY),
-         angularDisp = rad2deg(acos(dotProd/prodVectorLength)),
-         angularVelocity = abs(c(NA, diff(angularDisp)/diff(seconds)))) %>%
-  arrange(tag_id)
+         acceleration = c(NA, diff(speed)) / c(NA, diff(timestamp)))
+```
 
-rad2deg <- function(rad) {(rad * 180) / (pi)}
+As showed by @andreassen2019real the number of occurences and the distance covered during events such as sprints, high intensity runs (HIR), and accelerations, can easily be extracted from this kind of data. In said paper these events are defined as follows:
+HIR = A run at a speed faster than $5.5\,m.s^{-1}$ or $19.8\,km.h^{-1}$, over a time period of 1 second,
+Sprint = A run at a speed faster than $7.0\,m.s^{−1}$ over a time period greater than 1 seconds is said to be a sprint,
+and
+Acceleration = a change of speed over $2.0\,m.s^{2}$ over a duration of 0.5 seconds.
 
-df_cleaned <- df %>%
-  filter(!is.na(angularDisp) & !is.na(angularVelocity) & speed_km.h < 37 & acceleration < 6 & acceleration > -6) # & angularVelocity < 225 ) 
+To extract these events we're going to use a base R function called rle or "run length encoding". Rle captures the "run length" of events, which is useful in our case because we want to capture the duration in which the speed or acceleration is over a certain threshold. This can be done as follows:
 
-outliers <- subset(df, speed_km.h > 37 | angularVelocity > 270 | acceleration > 6 | acceleration < -6)
-
-df_stats <- df_cleaned %>%
-  group_by(tag_id, position) %>%
-  summarise(total_distance = max(total_distance),
-            sprint_distance = max(sprint_distance),
-            sprint_counts = sum(rle(speed_km.h > 25.2)$values, na.rm = TRUE),
-            hir_counts = sum(rle(speed_km.h >=19.8 & speed_km.h <= 25.2)$values, na.rm = TRUE),
-            accel_mod_counts = sum(rle(acceleration >= 2 & acceleration <= 4)$values, na.rm = TRUE),
-            accel_high_counts = sum(rle(acceleration > 4)$values, na.rm = TRUE),
-            decel_mod_counts = sum(rle(acceleration <=-2 & acceleration >=-4)$values, na.rm = TRUE),
-            decel_high_counts = sum(rle(acceleration < -4)$values, na.rm = TRUE))
-
-#specific player datasets
-player1 <- df_cleaned[df_cleaned$tag_id == "1",]
-
-accCounter <- function(acceleration, accThreshold, timestamp, timeThreshold) {
-  accVector <- vector("numeric", length = length(acceleration))
-  for (i in 1:length(acceleration)) {
-    if (acceleration[i] >= accThreshold) {
-      accVector[i] = 1
+```{r}
+counter <- function(metric, threshold, timestamp, timeThreshold) {
+  metricVector <- vector("numeric", length = length(metric))
+  for (i in 1:length(metric)) {
+    if (metric[i] > threshold) {
+      metricVector[i] = 1
     }
   }
-  accIndex <- rle(accVector)
-  accelIndexes <- cumsum(accIndex$lengths)
-  if (length(accelIndexes) %% 2 == 1) {
-    accelIndexes <- c(accelIndexes, accelIndexes[length(accelIndexes)])
+  rleMetric <- rle(metricVector)
+  indices <- cumsum(rleMetric$lengths)
+  if (length(indices) %% 2 == 1) {
+    indices <- c(indices, indices[length(indices)])
   }
-  accStart <- accelIndexes[seq(from = 1, to = length(accelIndexes), by = 2)]
-  accEnd <- accelIndexes[seq(from = 2, to = length(accelIndexes), by = 2)]
-  accStartStamp <- timestamp[accStart]
-  accEndStamp <- timestamp[accEnd]
-  accTimeDiff <- accEndStamp - accStartStamp
-  return(sum(accTimeDiff >= timeThreshold))
+  metricStart <- indices[seq(from = 1, to = length(indices), by = 2)]
+  metricEnd <- indices[seq(from = 2, to = length(indices), by = 2)]
+  metricStartStamp <- timestamp[metricStart]
+  metricEndStamp <- timestamp[metricEnd]
+  metricTimeDiff <- metricEndStamp - metricStartStamp
+  return(sum(metricTimeDiff > timeThreshold))
 }
 
-  
-player1accs <- accCounter(player1$acceleration, 2, player1$timestamp, 0.5)  
-player1accs  
-  
+df %>%
+  group_by(tag_id) %>%
+  summarise(accelerations = counter(na.omit(acceleration), 3, timestamp, 0.5), 
+            sprints = counter(speed, 7, timestamp, 1))
 
 accDistance <- function(acceleration, accThreshold, timestamp, distance, timeThreshold) {
   accVector <- vector("numeric", length = length(acceleration))
   for (i in 1:length(acceleration)) {
-    if (acceleration[i] >= accThreshold) {
+    if (acceleration[i] > accThreshold) {
       accVector[i] = 1
     }
   }
@@ -121,10 +104,54 @@ accDistance <- function(acceleration, accThreshold, timestamp, distance, timeThr
   accDistEndStamp <- distance[accEnd]
   accTimeDiff <- accEndStamp - accStartStamp
   accDistDiff <- accDistEndStamp - accDistStartStamp
-  return(sum(accDistDiff[accTimeDiff >= timeThreshold]))
+  return(sum(accDistDiff[accTimeDiff > timeThreshold]))
 }
 
-accDistanceP1 <- accDistance(player1$acceleration, 2, player1$timestamp, player1$total_distance, 0.5)
+df %>%
+  group_by(tag_id) %>%
+  summarise(accelerations = accDistance(na.omit(acceleration), 2, timestamp, total_distance, 0.5))
+
+
+
+```
+
+##Clustering
+
+
+         
+The ZXY system has a unique metric called "Turns" which basically measures how much the player is turning or changing direction. This metric is not featured in the dataset, but can be found in this paper by Baptista. Here it is defined as "a continuous and significant rotation of the body in one direction (derived from gyroscope and compass data)". Though, I have no idea if this metric can be derived using the published dataset. What I do know based this paper by @sweeting1232014movement is that we can calculate the angular displacement based on the x,y coordinates. This is done by calculating the dot product of consecutive movement vectors, as follows:
+
+$\theta_{i} = cos^{-1}[\,\frac{a*b}{\|a\|*\|b\|}]\,$  
+
+```{r}
+rad2deg <- function(rad) {(rad * 180) / (pi)} #Creates a function that translates radians into degrees.
+
+df <- df %>%
+  group_by(tag_id) %>%
+  mutate(vectorCompX = c(NA,diff(x_pos)),
+         vectorCompY = c(NA, diff(y_pos)),
+         vectorLength = sqrt(((vectorCompX^2) + (vectorCompY^2))),
+         prodVectorLength = vectorLength * lead(vectorLength),
+         dotProd = vectorCompX * lead(vectorCompX) + vectorCompY * lead(vectorCompY),
+         angularDisp = rad2deg(acos(dotProd/prodVectorLength))) %>%
+  arrange(tag_id)
+```
+
+
+df_stats <- df %>%
+  group_by(tag_id) %>%
+  summarise(total_distance = max(total_distance),
+            sprint_distance = max(sprint_distance),
+            sprint_counts = sum(rle(speed_km.h > 25.2)$values, na.rm = TRUE),
+            hir_counts = sum(rle(speed_km.h >=19.8 & speed_km.h <= 25.2)$values, na.rm = TRUE))
+            
+
+#specific player datasets
+player1 <- df_cleaned[df_cleaned$tag_id == "1",]
+
+
+
+
 
 vecHirDistance <- vector("numeric", length = length(player1$speed_km.h))
 for (i in 1:length(player1$total_distance)) {
