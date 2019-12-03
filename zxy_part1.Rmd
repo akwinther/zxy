@@ -35,7 +35,8 @@ names(df) <- c("timestamp", "tag_id", "x_pos", "y_pos", "heading", "direction", 
 
 options(digits.secs = 6)
 df$timestamp <- as.POSIXct(df$timestamp,format = "%Y-%m-%d %H:%M:%OS")
-#df$seconds <- as.numeric(df$timestamp - min(df$timestamp))
+df$seconds <- as.numeric(df$timestamp - min(df$timestamp))
+df$minutes <- df$seconds/60
 ```
 
 We are also going to add some common tracking metrics, namely cumulative high-intensity distance, cumulative sprint distance, and acceleration. 
@@ -56,7 +57,7 @@ Sprint = A run at a speed faster than $7.0\,m.s^{−1}$ over a time period great
 and
 Acceleration = a change of speed over $2.0\,m.s^{2}$ over a duration of 0.5 seconds.
 
-To extract these events we're going to use a base R function called rle or "run length encoding". Rle captures the "run length" of events, which is useful in our case because we want to capture the duration in which the speed or acceleration is over a certain threshold. This can be done as follows:
+To extract these events we're going to use a base R function called "rle" or "run length encoding". Rle captures the "run length" of events, which is useful in our case because we want to capture the duration in which the speed or acceleration is over a certain threshold. This can be done as follows:
 
 ```{r}
 counter <- function(metric, threshold, timestamp, timeThreshold) {
@@ -78,38 +79,100 @@ counter <- function(metric, threshold, timestamp, timeThreshold) {
   metricTimeDiff <- metricEndStamp - metricStartStamp
   return(sum(metricTimeDiff > timeThreshold))
 }
+```
 
+Now, let's use this function to find how many accelerations and sprints some players did in the first half:
+
+```{r}
 df %>%
   group_by(tag_id) %>%
-  summarise(accelerations = counter(na.omit(acceleration), 3, timestamp, 0.5), 
-            sprints = counter(speed, 7, timestamp, 1))
+  summarise(accelerations = counter(na.omit(acceleration), 2, timestamp, 0.8), 
+            sprints = counter(speed, 7, timestamp, 1)) %>%
+  filter(tag_id %in% c(1,7,9))
+```
 
-accDistance <- function(acceleration, accThreshold, timestamp, distance, timeThreshold) {
-  accVector <- vector("numeric", length = length(acceleration))
-  for (i in 1:length(acceleration)) {
-    if (acceleration[i] > accThreshold) {
-      accVector[i] = 1
+```{r}
+metricDistance <- function(metric, metricThreshold, timestamp, distance, timeThreshold) {
+  metricVector <- vector("numeric", length = length(metric))
+  for (i in 1:length(metric)) {
+    if (metric[i] >= metricThreshold) {
+      metricVector[i] = 1
     }
   }
-  accIndex <- rle(accVector)
-  accelIndexes <- cumsum(accIndex$lengths)
-  if (length(accelIndexes) %% 2 == 1) {
-    accelIndexes <- c(accelIndexes, accelIndexes[length(accelIndexes)])
+  metricIndex <- rle(metricVector)
+  metricIndexes <- cumsum(metricIndex$lengths)
+  if (length(metricIndexes) %% 2 == 1) {
+    metricIndexes <- c(metricIndexes, metricIndexes[length(metricIndexes)])
   }
-  accStart <- accelIndexes[seq(from = 1, to = length(accelIndexes), by = 2)]
-  accEnd <- accelIndexes[seq(from = 2, to = length(accelIndexes), by = 2)]
-  accStartStamp <- timestamp[accStart]
-  accEndStamp <- timestamp[accEnd]
-  accDistStartStamp <- distance[accStart]
-  accDistEndStamp <- distance[accEnd]
-  accTimeDiff <- accEndStamp - accStartStamp
-  accDistDiff <- accDistEndStamp - accDistStartStamp
-  return(sum(accDistDiff[accTimeDiff > timeThreshold]))
+  metricStart <- metricIndexes[seq(from = 1, to = length(metricIndexes), by = 2)]
+  metricEnd <- metricIndexes[seq(from = 2, to = length(metricIndexes), by = 2)]
+  metricStartStamp <- timestamp[metricStart] #Subsets indices in "timestamp"" where a sprint or acceleration starts
+  metricEndStamp <- timestamp[metricEnd] #Subsets indices in "timestamp" where" a sprint or acceleration ends 
+  metricDistStartStamp <- distance[metricStart] #Subsets indices in "distance" where a sprint or acceleration starts
+  metricDistEndStamp <- distance[metricEnd] #Subsets indices in "distance" where a sprint or acceleration ends
+  metricTimeDiff <- metricEndStamp - metricStartStamp #Calculates the time between sprint/accleration start and end
+  metricDistDiff <- metricDistEndStamp - metricDistStartStamp #Calculates the distance between sprint/acceleration start and end
+  return(sum(metricDistDiff[metricTimeDiff >= timeThreshold])) #Returns the total distance of sprint/accelerations where the time is over a certian threshold
 }
 
 df %>%
   group_by(tag_id) %>%
-  summarise(accelerations = accDistance(na.omit(acceleration), 2, timestamp, total_distance, 0.5))
+  summarise(accelDist = metricDistance(na.omit(acceleration), 2, timestamp, total_distance, 0.8),
+            sprintDist = metricDistance(speed, 7, timestamp, total_distance, 1),
+            minutes = max(minutes),
+            workRateAccel = accelDist/minutes,
+            workRateSprint = sprintDist/minutes) %>%
+  filter(tag_id %in% c(1,7,9))
+```
+
+
+```{r}
+sprintDistance <- function(speed, speedThreshold, timestamp, distance, timeThreshold) {
+  sprintVector <- vector("numeric", length = length(speed))
+  for (i in 1:length(speed)) {
+    if (speed[i] > speedThreshold) {
+      sprintVector[i] = 1
+    }
+  }
+  sprintIndex <- rle(sprintVector)
+  sprintIndexes <- cumsum(sprintIndex$lengths)
+  if (length(sprintIndexes) %% 2 == 1) {
+    sprintIndexes <- c(sprintIndexes, sprintIndexes[length(sprintIndexes)])
+  }
+  sprintStart <- sprintIndexes[seq(from = 1, to = length(sprintIndexes), by = 2)]
+  sprintEnd <- sprintIndexes[seq(from = 2, to = length(sprintIndexes), by = 2)]
+  sprintStartStamp <- timestamp[sprintStart] #Subsets timestamp indexes where a sprint starts
+  sprintEndStamp <- timestamp[sprintEnd] #Subsets timestamp indexes where a sprint ends
+  sprintDistStartStamp <- distance[sprintStart] #Subsets distance indexes where a sprint starts 
+  sprintDistEndStamp <- distance[sprintEnd] #Subsets distance indexes where a sprint ends 
+  sprintTimeDiff <- sprintEndStamp - sprintStartStamp #Calculates the time difference between sprint start and end
+  sprintDistDiff <- sprintDistEndStamp - sprintDistStartStamp
+  return(sprintDistDiff >= 1 & sprintDistDiff <= 5)
+  
+  #return(sprintDistDiff[sprintTimeDiff > timeThreshold])
+}
+
+sprintDistance(p1$speed,7,p1$timestamp,p1$total_distance,1)
+
+
+vecHirDistance <- vector("numeric", length = length(player1$speed_km.h))
+  for (i in 1:length(player1$total_distance)) {
+    if (player1$speed_km.h[i] >= 19.8 & player1$speed_km.h[i] <= 25.2) {
+      vecHirDistance[i] = 1
+    }
+}
+
+hirIndex <- rle(vecHirDistance)
+hirIndexes <- cumsum(hirIndex$lengths)
+  if (length(hirIndexes) %% 2 == 1) {
+    hirIndexes <- c(hirIndexes, hirIndexes[length(hirIndexes)])
+  }
+  hirStart <- hirIndexes[seq(from = 1, to = length(hirIndexes), by = 2)]
+  hirEnd <- hirIndexes[seq(from = 2, to = length(hirIndexes), by = 2)]
+  hirStartDist <- player1$total_distance[hirStart]
+  hirEndDist <- player1$total_distance[hirEnd]
+  hirDistanceRun <- hirEndDist - hirStartDist
+  sum(hirDistanceRun >= 36 & hirDistanceRun <= 40)
 
 
 
@@ -138,39 +201,12 @@ df <- df %>%
 ```
 
 
-df_stats <- df %>%
-  group_by(tag_id) %>%
-  summarise(total_distance = max(total_distance),
-            sprint_distance = max(sprint_distance),
-            sprint_counts = sum(rle(speed_km.h > 25.2)$values, na.rm = TRUE),
-            hir_counts = sum(rle(speed_km.h >=19.8 & speed_km.h <= 25.2)$values, na.rm = TRUE))
-            
-
 #specific player datasets
 player1 <- df_cleaned[df_cleaned$tag_id == "1",]
 
 
 
 
-
-vecHirDistance <- vector("numeric", length = length(player1$speed_km.h))
-for (i in 1:length(player1$total_distance)) {
-    if (player1$speed_km.h[i] >= 19.8 & player1$speed_km.h[i] <= 25.2) {
-      vecHirDistance[i] = 1
-    }
-}
-
-hirIndex <- rle(vecHirDistance)
-hirIndexes <- cumsum(hirIndex$lengths)
-  if (length(hirIndexes) %% 2 == 1) {
-    hirIndexes <- c(hirIndexes, hirIndexes[length(hirIndexes)])
-  }
-  hirStart <- hirIndexes[seq(from = 1, to = length(hirIndexes), by = 2)]
-  hirEnd <- hirIndexes[seq(from = 2, to = length(hirIndexes), by = 2)]
-  hirStartDist <- player1$total_distance[hirStart]
-  hirEndDist <- player1$total_distance[hirEnd]
-  hirDistanceRun <- hirEndDist - hirStartDist
-  sum(hirDistanceRun >= 36 & hirDistanceRun <= 40)
 
 
 
