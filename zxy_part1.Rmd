@@ -16,9 +16,9 @@ knitr::opts_chunk$set(echo = TRUE)
 In this post we'll calculate some basic tracking metrics using the ZXY data from Pettersen et al 2014. 
 
 ```{r echo=FALSE, message=FALSE}
-install.packages("Rcpp", repos = "http://cran.us.r-project.org")
-install.packages("ggforce", repos = "http://cran.us.r-project.org")
-library(ggforce)
+#install.packages("Rcpp", repos = "http://cran.us.r-project.org")
+#install.packages("ggforce", repos = "http://cran.us.r-project.org")
+#library(ggforce)
 library(dplyr)
 library(zoo)
 library(ggplot2)
@@ -80,16 +80,28 @@ counter <- function(metric, threshold, timestamp, timeThreshold) {
   return(sum(metricTimeDiff > timeThreshold))
 }
 ```
+What's basically happening here is that the function creates a vector, which we are going to fill with 0s and 1s. Here, 1 represents an index where either the speed or acceleration is above a certian threshold. Next, we run this vector through "rle" which then counts the number of indices with consecutive 0s. When it finds a 1, it starts counting how many this number appears before stumbling upon a zero again. Then it starts counting consecutive zeroes, etc. Next we want the indices where a sprint or acceleration starts or ends. Since "rle" counts, for example, 73 zeroes, 22 ones, 55 zeroes, we can use the cumulative sum over each counted number to get the actually indices. In the given example, a sprint or acceleration starts at index 73 and ends at 95. By sequensing every other index, we extract the start and end of each sprint or acceleration. We then use these vectors to subset the timestamp of start or an and of each sprint and acceleration. By substracting the start of a metric from the end we then get the time difference. Finally we filter out all the sprints or acceleration which to not meet the time threshold, and count the number we are left with, giving us the number of sprint or accelerations in the dataset.    
 
 Now, let's use this function to find how many accelerations and sprints some players did in the first half:
 
 ```{r}
 df %>%
   group_by(tag_id) %>%
-  summarise(accelerations = counter(na.omit(acceleration), 2, timestamp, 0.8), 
+  summarise(accelerations = counter(na.omit(acceleration), 2, timestamp, 0.5), 
             sprints = counter(speed, 7, timestamp, 1)) %>%
   filter(tag_id %in% c(1,7,9))
 ```
+
+The number of sprints are basically the same as reported in @pettersen2018quantified, @baptista2018position, @ingebrigtsen2015acceleration, and @dalen2016player. However, accelerations differ by quite alot... ~205-251 vs. ~38-45. Tinkering with the time threshold makes it a little better: 
+```{r}
+df %>%
+  group_by(tag_id) %>%
+  summarise(accelerations = counter(na.omit(acceleration), 2, timestamp, 0.85), 
+            sprints = counter(speed, 7, timestamp, 1)) %>%
+  filter(tag_id %in% c(1,7,9))
+```
+
+Other common metrics such as sprint and acceleration distance, and sprint and acceleration workrate (distance per minute), can be derived as follows: 
 
 ```{r}
 metricDistance <- function(metric, metricThreshold, timestamp, distance, timeThreshold) {
@@ -117,17 +129,16 @@ metricDistance <- function(metric, metricThreshold, timestamp, distance, timeThr
 
 df %>%
   group_by(tag_id) %>%
-  summarise(accelDist = metricDistance(na.omit(acceleration), 2, timestamp, total_distance, 0.8),
+  summarise(accelDist = metricDistance(na.omit(acceleration), 2, timestamp, total_distance, 0.85),
             sprintDist = metricDistance(speed, 7, timestamp, total_distance, 1),
-            minutes = max(minutes),
-            workRateAccel = accelDist/minutes,
-            workRateSprint = sprintDist/minutes) %>%
+            workRateAccel = accelDist/max(minutes),
+            workRateSprint = sprintDist/max(minutes)) %>%
   filter(tag_id %in% c(1,7,9))
 ```
 
 
 ```{r}
-sprintDistance <- function(speed, speedThreshold, timestamp, distance, timeThreshold) {
+sprintDistance <- function(speed, speedThreshold, timestamp, distance, timeThreshold, meterStart, meterEnd) {
   sprintVector <- vector("numeric", length = length(speed))
   for (i in 1:length(speed)) {
     if (speed[i] > speedThreshold) {
@@ -147,35 +158,25 @@ sprintDistance <- function(speed, speedThreshold, timestamp, distance, timeThres
   sprintDistEndStamp <- distance[sprintEnd] #Subsets distance indexes where a sprint ends 
   sprintTimeDiff <- sprintEndStamp - sprintStartStamp #Calculates the time difference between sprint start and end
   sprintDistDiff <- sprintDistEndStamp - sprintDistStartStamp
-  return(sprintDistDiff >= 1 & sprintDistDiff <= 5)
+  sprintDistDiff <- sprintDistDiff >= meterStart & sprintDistDiff <= meterEnd
+  return(sum(sprintDistDiff[sprintTimeDiff > timeThreshold]))
   
-  #return(sprintDistDiff[sprintTimeDiff > timeThreshold])
+  
+ 
 }
 
-sprintDistance(p1$speed,7,p1$timestamp,p1$total_distance,1)
-
-
-vecHirDistance <- vector("numeric", length = length(player1$speed_km.h))
-  for (i in 1:length(player1$total_distance)) {
-    if (player1$speed_km.h[i] >= 19.8 & player1$speed_km.h[i] <= 25.2) {
-      vecHirDistance[i] = 1
-    }
-}
-
-hirIndex <- rle(vecHirDistance)
-hirIndexes <- cumsum(hirIndex$lengths)
-  if (length(hirIndexes) %% 2 == 1) {
-    hirIndexes <- c(hirIndexes, hirIndexes[length(hirIndexes)])
-  }
-  hirStart <- hirIndexes[seq(from = 1, to = length(hirIndexes), by = 2)]
-  hirEnd <- hirIndexes[seq(from = 2, to = length(hirIndexes), by = 2)]
-  hirStartDist <- player1$total_distance[hirStart]
-  hirEndDist <- player1$total_distance[hirEnd]
-  hirDistanceRun <- hirEndDist - hirStartDist
-  sum(hirDistanceRun >= 36 & hirDistanceRun <= 40)
-
-
-
+df %>%
+  group_by(tag_id) %>%
+  summarise(sprintMeters1_5 = sprintDistance(speed, 7, timestamp, total_distance, 0, 1, 5),
+            sprintMeters6_10 = sprintDistance(speed, 7, timestamp, total_distance, 0, 6, 10),
+            sprintMeters11_15 = sprintDistance(speed, 7, timestamp, total_distance, 0, 11, 15),
+            sprintMeters16_20 = sprintDistance(speed, 7, timestamp, total_distance, 0, 16, 20),
+            sprintMeters21_25 = sprintDistance(speed, 7, timestamp, total_distance, 0, 21, 25),
+            sprintMeters26_30 = sprintDistance(speed, 7, timestamp, total_distance, 0, 26, 30),
+            sprintMeters31_35 = sprintDistance(speed, 7, timestamp, total_distance, 0, 31, 35),
+            sprintMeters36_40 = sprintDistance(speed, 7, timestamp, total_distance, 0, 36, 40),
+            sprintMeters41plus = sprintDistance(speed, 7, timestamp, total_distance, 0, 41, 80)) %>%
+  filter(tag_id %in% c(2,5,7,8,9,10,13,14,15,1))
 ```
 
 ##Clustering
