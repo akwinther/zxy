@@ -42,13 +42,28 @@ df$minutes <- df$seconds/60
 We are also going to add some common tracking metrics, namely cumulative high-intensity distance, cumulative sprint distance, and acceleration. 
 
 ```{r}
+p1 <- df[df$tag_id == 1,]
+bf1 <- butter(3, 0.03, type = "low", plane = "z") 
+p1speedfiltered <- filter(bf1, p1$speed)
+summary(p1speedfiltered)
+summary(p1$speed)
+
 df <- df %>%
   group_by(tag_id) %>%
   mutate(distance = (sqrt((x_pos - lag(x_pos))^2 + (y_pos - lag(y_pos))^2)),
          speed_km.h = (speed * 3.6),
          hir_distance = (cumsum(ifelse(speed_km.h >=19.8 & speed_km.h <= 25.2, distance, 0))),
          sprint_distance = (cumsum(ifelse(speed_km.h > 25.2, distance, 0))),
-         acceleration = c(NA, diff(speed)) / c(NA, diff(timestamp)))
+         speedfiltered = filter(bf1, speed),
+         acceleration = c(NA, diff(speed)) / c(NA, diff(timestamp)),
+         accelerationFiltered = c(NA, diff(speedfiltered)) / c(NA, diff(timestamp)))
+
+summary(df$speed)
+summary(df$speedfiltered)
+summary(df$acceleration)
+summary(df$accelerationFiltered)
+boxplot.stats(df$accelerationFiltered)
+
 ```
 
 As showed by @andreassen2019real the number of occurences and the distance covered during events such as sprints, high intensity runs (HIR), and accelerations, can easily be extracted from this kind of data. In said paper these events are defined as follows:
@@ -87,9 +102,8 @@ Now, let's use this function to find how many accelerations and sprints some pla
 ```{r}
 df %>%
   group_by(tag_id) %>%
-  summarise(accelerations = counter(na.omit(acceleration), 2, timestamp, 0.5), 
-            sprints = counter(speed, 7, timestamp, 1)) %>%
-  filter(tag_id %in% c(1,7,9))
+  summarise(accelerations = counter(na.omit(accelerationFiltered), 2, timestamp, 0.5), 
+            sprints = counter(speedfiltered, 7, timestamp, 1))  
 ```
 
 The number of sprints are basically the same as reported in @pettersen2018quantified, @baptista2018position, @ingebrigtsen2015acceleration, and @dalen2016player. However, accelerations differ by quite alot... ~205-251 vs. ~38-45. Tinkering with the time threshold makes it a little better: 
@@ -129,10 +143,10 @@ metricDistance <- function(metric, metricThreshold, timestamp, distance, timeThr
 
 df %>%
   group_by(tag_id) %>%
-  summarise(accelDist = metricDistance(na.omit(acceleration), 2, timestamp, total_distance, 0.85),
-            sprintDist = metricDistance(speed, 7, timestamp, total_distance, 1),
+  summarise(accelDist = metricDistance(na.omit(accelerationFiltered), 2, timestamp, total_distance, 0.5),
+            sprintDist = metricDistance(speedfiltered, 7, timestamp, total_distance, 1),
             workRateAccel = accelDist/max(minutes),
-            workRateSprint = sprintDist/max(minutes)) %>%
+            workRateSprint = sprintDist/max(minutes)) #%>%
   filter(tag_id %in% c(1,7,9))
 ```
 
@@ -160,73 +174,48 @@ sprintDistance <- function(speed, speedThreshold, timestamp, distance, timeThres
   sprintDistDiff <- sprintDistEndStamp - sprintDistStartStamp
   sprintDistDiff <- sprintDistDiff >= meterStart & sprintDistDiff <= meterEnd
   return(sum(sprintDistDiff[sprintTimeDiff > timeThreshold]))
-  
-  
- 
 }
 
 df %>%
   group_by(tag_id) %>%
-  summarise(sprintMeters1_5 = sprintDistance(speed, 7, timestamp, total_distance, 0, 1, 5),
-            sprintMeters6_10 = sprintDistance(speed, 7, timestamp, total_distance, 0, 6, 10),
-            sprintMeters11_15 = sprintDistance(speed, 7, timestamp, total_distance, 0, 11, 15),
-            sprintMeters16_20 = sprintDistance(speed, 7, timestamp, total_distance, 0, 16, 20),
-            sprintMeters21_25 = sprintDistance(speed, 7, timestamp, total_distance, 0, 21, 25),
-            sprintMeters26_30 = sprintDistance(speed, 7, timestamp, total_distance, 0, 26, 30),
-            sprintMeters31_35 = sprintDistance(speed, 7, timestamp, total_distance, 0, 31, 35),
-            sprintMeters36_40 = sprintDistance(speed, 7, timestamp, total_distance, 0, 36, 40),
-            sprintMeters41plus = sprintDistance(speed, 7, timestamp, total_distance, 0, 41, 80)) %>%
+  summarise(sprintMeters1_5 = sprintDistance(speedfiltered, 7, timestamp, total_distance, 0, 1, 5),
+            sprintMeters6_10 = sprintDistance(speedfiltered, 7, timestamp, total_distance, 0, 6, 10),
+            sprintMeters11_15 = sprintDistance(speedfiltered, 7, timestamp, total_distance, 0, 11, 15),
+            sprintMeters16_20 = sprintDistance(speedfiltered, 7, timestamp, total_distance, 0, 16, 20),
+            sprintMeters21_25 = sprintDistance(speedfiltered, 7, timestamp, total_distance, 0, 21, 25),
+            sprintMeters26_30 = sprintDistance(speedfiltered, 7, timestamp, total_distance, 0, 26, 30),
+            sprintMeters31_35 = sprintDistance(speedfiltered, 7, timestamp, total_distance, 0, 31, 35),
+            sprintMeters36_40 = sprintDistance(speedfiltered, 7, timestamp, total_distance, 0, 36, 40),
+            sprintMeters41plus = sprintDistance(speedfiltered, 7, timestamp, total_distance, 0, 41, 80)) # %>%
   filter(tag_id %in% c(2,5,7,8,9,10,13,14,15,1))
 ```
 
-##Clustering
+###Metabolic power
 
-
-         
-The ZXY system has a unique metric called "Turns" which basically measures how much the player is turning or changing direction. This metric is not featured in the dataset, but can be found in this paper by Baptista. Here it is defined as "a continuous and significant rotation of the body in one direction (derived from gyroscope and compass data)". Though, I have no idea if this metric can be derived using the published dataset. What I do know based this paper by @sweeting1232014movement is that we can calculate the angular displacement based on the x,y coordinates. This is done by calculating the dot product of consecutive movement vectors, as follows:
-
-$\theta_{i} = cos^{-1}[\,\frac{a*b}{\|a\|*\|b\|}]\,$  
-
+Another interesting metric is metabolic power:
 ```{r}
-rad2deg <- function(rad) {(rad * 180) / (pi)} #Creates a function that translates radians into degrees.
 
 df <- df %>%
   group_by(tag_id) %>%
-  mutate(vectorCompX = c(NA,diff(x_pos)),
-         vectorCompY = c(NA, diff(y_pos)),
-         vectorLength = sqrt(((vectorCompX^2) + (vectorCompY^2))),
-         prodVectorLength = vectorLength * lead(vectorLength),
-         dotProd = vectorCompX * lead(vectorCompX) + vectorCompY * lead(vectorCompY),
-         angularDisp = rad2deg(acos(dotProd/prodVectorLength))) %>%
-  arrange(tag_id)
+  mutate(alpha = rad2deg(atan(9.81/acceleration)),
+         g = sqrt(acceleration^2 + 9.81^2),
+         equivilantSlope = tan(0.5 * pi - atan(9.81/acceleration)),
+         equivilantMass = g/9.81,
+         energyCost = ifelse(acceleration == 0, 3.6*1.29, (155.4*equivilantSlope^5 - 30.4*equivilantSlope^4 - 43.3*equivilantSlope^3 + 46.3*equivilantSlope^2 + 19.5*equivilantSlope + 3.6)*equivilantMass*1.29),
+         metabolicPower = energyCost*speed)
+
+summary(df$metabolicPower)
+boxplot.stats(df$metabolicPower)
+hist(df$metabolicPower, freq = FALSE)
+sum(df$metabolicPower > 70, na.rm = TRUE)
+median(df$metabolicPower, na.rm = TRUE)
+median(df$energyCost, na.rm = TRUE)
 ```
 
+##Clustering
+As showed by @sweeting2017discovering rather than using pre-determined metric threshold, one can instead use machine learning to determine these threshold up with x-number of threshold. In the mentioned paper they used what is know as k-means clustering. This technique works by iterating over a set of observations (velocity data) and a set number of groups (n = 4). The k-means algorithm finds the center of each group, allocating each data point based on the closest center and iteratively (re)assigning the center until each data point within the set is allocated. The following function can be used to determined clusters for any metric: 
 
-#specific player datasets
-player1 <- df_cleaned[df_cleaned$tag_id == "1",]
-
-
-
-
-
-
-
-
-
-player1_200_380 <- player1[player1$seconds >200 & player1$seconds < 380,]
-
-ggplot(data = player1,
- aes(x = seconds, y = speed_km.h, color = speed_km.h)) +
- geom_line() +
- scale_colour_gradientn(colours = rainbow(7)) +
- xlab("\n Time (s)") +
- ylab(expression(Velocity ~ (m.s^-1))) +
- scale_x_continuous(limits = c(200, 380), expand = c(0, 0), breaks = seq(200, 380, by = 20)) +
-  scale_y_continuous() +
- theme_classic() +
- theme(legend.position = "none") #+ 
-  facet_wrap(tag_id ~ .)
-
+```{r}
 clusters <- function(x,y) {
   clusterMatrix <- as.matrix(x[!is.na(x)], ncol = 1)
   nClusters <- y
@@ -235,17 +224,32 @@ clusters <- function(x,y) {
   return(k.clusters)
 }  
 
-accelClusters <- clusters(df_cleaned$acceleration, 3) 
+accelerationClusters <- clusters(df$acceleration, 3)
+metPowClusters <- clusters(df$metabolicPower, 1)
+
 accelClusters$centers
+format(metPowClusters$centers, scientific = F)
 
-# Add the cluster data info back into the dummy data
-df_cleaned$accelCluster <- accelClusters$cluster
-df_cleaned$accelNotational <- factor(accelClusters$cluster, levels = 1:length(accelClusters$centers), labels = c("Acceleration", "Neutral", "Deceleration")) #c(as.character(round(accelClusters$centers, 1))))
+# Heading cluster
+df$headingCluster <- headingClusters$cluster
+df$headingNotational <- factor(headingClusters$cluster, levels = 1:length(headingClusters$centers), labels = c("Left turn", "Straight", "Right turn"))
 
+df$directionCluster <- directionClusters$cluster
+df$directionNotational <- factor(directionClusters$cluster, levels = 1:length(directionClusters$centers), labels = c("-2", "1", "2", "0"))
 
+# Angular disp clusters
+df$angularDispClusters <- NA
+df$angularDispClusters[which(!is.na(df$angularDisp))] <- angularDispClusters$cluster
+df$angularDispNotational <- factor(df$angularDispClusters, levels = 1:length(angularDispClusters$centers), labels = c("0.3", "2.2", "0.0", "0.1", "0.85"))
 
-#specific player datasets
-player1 <- df_cleaned[df_cleaned$tag_id == "1",]
+# Angular velocity clusters
+df$angularVelocityClusters <- NA
+df$angularVelocityClusters[which(!is.na(df$angularVeloctiy))] <- angularVelocityClusters$cluster
+df$angularVelocityNotational <- factor(df$angularVelocityClusters, levels = 1:length(angularVelocityClusters$centers), labels = c("Straight", "1", "2", "3"))
+      
+df$accelNotational <- factor(accelClusters$cluster, levels = 1:length(accelClusters$centers), labels = c("Neutral", "Deceleration", "Acceleration")) #c(as.character(round(accelClusters$centers, 1))))
+
+player1 <- df[df$tag_id == 1,]
 player1_200_380 <- player1[player1$seconds >200 & player1$seconds < 380,]
 
 # Create a new column, based on "Centers" data.frame
@@ -270,147 +274,15 @@ labs(colour = 'Notational Descriptor') +
 theme_classic() +
 theme(legend.position = "bottom")  
 
+
+
 ggplot(player1_200_380) +
-  geom_segment(aes(x = 105, y = 0, xend = 105, yend = Inf)) +
-  geom_segment(aes(x = 105/2, y = 0, xend = 105/2, yend = Inf)) +
-  geom_segment(aes(x = 40, xend = 105, y = 0, yend = 0)) +
-  geom_segment(aes(x = 105 - 16.5, xend = 105, y = 68/2 - 20.15, yend = 68/2 - 20.15)) +
-  geom_segment(aes(x = 105 - 16.5, xend = 105 - 16.5, y = 68/2 - 20.15, yend = Inf)) +
-  geom_segment(aes(x = 105 - 5.5, xend = 105, y = 68/2 - 9.16, yend = 68/2 - 9.16)) +
-  geom_segment(aes(x = 105 - 5.5, xend = 105 - 5.5, y = 68/2 - 9.16, yend = Inf)) +
-  #geom_path(aes(x = x_pos, y = y_pos, color = angularDisp)) +
-  geom_path(aes(x = x_pos, y = y_pos, color = NotationalDescriptor, group = 1)) +
-  scale_color_manual(values = c("green", "red", "black", "blue")) +
+  #geom_path(aes(x = x_pos, y = y_pos, color = turns)) +
+  geom_path(aes(x = x_pos, y = y_pos, color = angularDispNotational, group = 1)) +
+  scale_color_discrete() +
   #scale_color_gradientn(colors = rainbow(7)) +
-  scale_x_continuous(limits = c(40,105)) +
-  coord_fixed() +
-  theme_classic() + 
-  theme(plot.background = element_blank(), 
-        legend.position="bottom", 
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank(), 
-        axis.line = element_blank(), 
-        axis.text.x = element_blank(), 
-        axis.text.y = element_blank(), 
-        axis.ticks = element_blank(), 
-        axis.title.x = element_blank(), 
-        axis.title.y = element_blank())
-
-
-
-
-```
-
-For the pitch I used code from Joe Gallagher's soccermatics package.
-```{r}
-pitchBG <- function(lengthPitch = 105, widthPitch = 68, fill = "white", colour = "dimgrey", size = 1) 
-  {
-  ggplot() +
-  # perimeter line
-  geom_rect(aes(xmin = 0, xmax = lengthPitch, ymin = 0, ymax = widthPitch), fill = fill, colour = colour, size = 1) +
-  # centre circle
-  geom_circle(aes(x0 = lengthPitch/2, y0 = widthPitch/2, r = 9.15), colour = colour, size = 1) +
-  # kick off spot
-  geom_circle(aes(x0 = lengthPitch/2, y0 = widthPitch/2, r = 0.25), fill = fill, colour = colour, size = 1) +
-  # halfway line
-  geom_segment(aes(x = lengthPitch/2, y = 0, xend = lengthPitch/2, yend = widthPitch), colour = colour, size = 1) + # penalty arcs
-  geom_arc(aes(x0 = 11, y0 = widthPitch/2, r = 9.15, start = 0.65, end = 2.49), colour = colour, size = 1) +
-  geom_arc(aes(x0 = lengthPitch - 11, y0 = widthPitch/2, r = 9.15, start = 3.79, end = 5.63), colour = colour, size = 1) +
-  # penalty areas
-  geom_rect(aes(xmin = 0, xmax = 16.5, ymin = widthPitch/2 - 20.15, ymax = widthPitch/2 + 20.15), fill = NA, colour = colour, size = 1) +
-  geom_rect(aes(xmin = lengthPitch - 16.5, xmax = lengthPitch, ymin = widthPitch/2 - 20.15, ymax = widthPitch/2 + 20.15), fill = NA, colour = colour, size = 1) +
-  # penalty spots
-  geom_circle(aes(x0 = 11, y0 = widthPitch/2, r = 0.25), fill = colour, col = colour, size = 1) +
-  geom_circle(aes(x0 = lengthPitch - 11, y0 = widthPitch/2, r = 0.25), fill = colour, colour = colour, size = 1) +
-  # six yard boxes
-  geom_rect(aes(xmin = 0, xmax = 5.5, ymin = (widthPitch/2) - 9.16, ymax = (widthPitch/2) + 9.16), fill = NA, colour = colour, size = 1) +
-  geom_rect(aes(xmin = lengthPitch - 5.5, xmax = lengthPitch, ymin = (widthPitch/2) - 9.16, ymax = (widthPitch/2) + 9.16), fill = NA, colour = colour, size = 1) +
-  # goals
-  geom_rect(aes(xmin = -2, xmax = 0, ymin = (widthPitch/2) - 3.66, ymax = (widthPitch/2) + 3.66), fill = NA, colour = colour, size = 1) +
-  geom_rect(aes(xmin = lengthPitch, xmax = lengthPitch + 2, ymin = (widthPitch/2) - 3.66, ymax = (widthPitch/2) + 3.66), fill = NA, colour = colour, size = 1) +
-  coord_fixed() +
-  xlab("") +
-  ylab("")
-  }
-pitchBG()
-```
-
-
-```{r}
-avg_positions <- df %>% 
-  group_by(tag_id) %>%
-  summarise(avg_x = mean(x_pos),
-            avg_y = mean(y_pos),
-            distance = max(total_distance))
-
-pitchBG() +
-  geom_point(aes(avg_x, avg_y),
-             data = avg_positions,
-             fill = "red", 
-             shape = 21,
-             size = 7) +
-  geom_text(aes(avg_x, avg_y, label = tag_id), data = avg_positions, colour = "white", fontface = "bold", size = 3)
-```
-The graph shows the average position corresponding to each tag id. As showed 9 tags are outfield players, while 5 look like substitute. Furthermore, by looking "avg_positions" we can see that they haven't run as much either. Using this information we can create a lookup table and name the positions to our dataframe.
-```{r}
-positionsLookup <- c("2" = "RB", "4" = "RCB", "14" = "LCB", "1" = "LB", "8" = "RM", "11" = "RCM", "6" = "LM", "5" = "ST", "12" = "FW", "9" = "Sub1", "10" = "Sub2", "7" = "Sub3", "13" = "Sub4", "3" = "Sub5")
-
-df$position <- positionsLookup[as.character(df$tag_id)]
-
-starters <- df %>%
-  group_by(position) %>%
-  filter(max(total_distance) > 1000)
-```
-
-```{r}
-speedPlot <- ggplot(starters, aes(x = seconds, y = speed_km.h)) +
-  geom_path() +
-  theme_minimal() +
-  facet_wrap(~ position, ncol = 3)
-speedPlot
-```
-
-
-
-```{r}
-boxPlots <- ggplot(starters, aes(x = position, y = speed_km.h)) +
-  geom_boxplot() +
   theme_minimal()
-boxPlots
+
+
+
 ```
-
-```{r}
-outliers <- boxplot(starters$speed_km.h, plot = FALSE)$out
-outliers
-```
-
-
-
-
-
-
-
-```{r}
-speedHisto <- ggplot(starters, aes(speed_km.h)) +
-  geom_histogram(binwidth = 1) +
-  theme_minimal() +
-  facet_wrap(~ position, ncol = 3)
-speedHisto
-```
-Let's calculate acceleration:
-```{r}
-startersCleaned <- starters
-startersCleaned$speed <- replace(startersCleaned$speed, startersCleaned$speed == 0, NA)
-
-startersCleaned <- startersCleaned %>%
-  group_by(position) %>%
-  mutate(acceleration = c(NA, diff(speed)/diff(seconds)))
-
-accelPlot <- ggplot(startersCleaned, aes(x = seconds, y = acceleration)) +
-  geom_path() +
-  theme_classic() +
-  facet_wrap(~ position, ncol = 3)
-accelPlot
-```
-```{r}
-rle(startersCleaned$speed > 9)
