@@ -1,7 +1,7 @@
 ---
 title: "Calculating tracking metrics using ZXY data"
 author: "Andreas K. Winther"
-output: rmarkdown::github_document
+output: html
 bibliography: references.bib
 csl: apa.csl
 ---
@@ -12,69 +12,276 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Intro
 
-This markdown document shows how to calculate some basic tracking metrics using data published by @pettersen2014soccer. A more indepth look into the following code and the metrics themselves will be part of a future blogpost on wintherperformance.com. 
+With sports analytics being such a hot topic these days, in no small part thanks to the FriendsOfTracking community, I thought I'd write my own post showing how to calculate some basic tracking metrics. Although Metrica Sports recently released a freely available dataset, I'll instead be using a dataset released by colleagues here at University of Tromsø (@pettersen2014soccer). The data itself stems from a stationary radio-based tracking systems (ZXY Sport Tracking System), which captures player position data at 20hz. The metrics I'll be focusing on are velocity, accelerations and decelerations, and metabolic power. Although it's possible to write a script iterating through all of the games provided by the authors, I'll only be focusing on one game this time: The first half of Tromsø vs. Strømsgodset. 
 
-The following packages are required:
 ```{r message=FALSE}
+
 library(signal)
 library(zoo)
 library(dplyr)
 library(ggplot2)
+library(plyr)
+library(xts)
+library(knitr)
 ```
 
-### Importing and changing column names
-Import the dataset. Then change the names of the variables while adding a column with the time elapsed in seconds, and one in minutes. Next, use the x and y columns to calculate distance.
-```{r}
-df <- read.csv("http://home.ifi.uio.no/paalh/dataset/alfheim/2013-11-03/zxy/2013-11-03_tromso_stromsgodset_first.csv", header = FALSE)
 
-names(df) <- c("timestamp", "tag_id", "x_pos", "y_pos", "heading", "direction", "energy", "speed", "total_distance")
+## Importing and wrangling data 
 
-options(digits.secs = 6)
-df$timestamp <- as.POSIXct(df$timestamp,format = "%Y-%m-%d %H:%M:%OS")
-df$seconds <- as.numeric(df$timestamp - min(df$timestamp))
-df$minutes <- df$seconds/60
+Let's start by creating a function that imports a ZXY dataset and changes the column names of the dataset into something useful. At the same time we're going to change the class of the timestamp column from character to POSIXct using *lubridate*. This will be import for later calculations. 
 
-df <- df %>%
+```{r warning=FALSE}
+if (!require("lubridate")) install.packages("lubridate")
+library(lubridate)
+
+getZXY <- function(path, colnames) {
+  zxy <- read.csv(path, header = FALSE, stringsAsFactors = FALSE) # Imports the dataset
+  names(zxy) <- colnames # Changes column names
+  zxy <- zxy[order(zxy[2]),] # Orders the dataset by the seconds column/tag_id
+  options(digits.secs = 6) # Displays the full timestamp
+  zxy$timestamp <- ymd_hms(zxy$timestamp) # Converts timestamp into POSIXct
+  return(zxy)
+}
+ 
+PATH <- "C:/Users/awi027/Downloads/2013-11-03_tromso_stromsgodset_raw_first.csv"
+COLNAMES <- c("timestamp", "tag_id", "x_pos", "y_pos", "heading", "direction", "energy", "speed", "total_distance")
+
+zxy <- getZXY(PATH, COLNAMES)
+
+```
+
+A prerequisite when working with time-series data is that the data is  structured in regular intervals. In our case, the difference between succesive rows should be 0.05 seconds. However, with raw sensor data such as this we can expect external factors to cause some signal disruptions. Let's see check for this by first creating a column containing the difference in seconds from the last row, and then summarizing the results in a couple of table.        
+
+```{r, results='asis'}
+library(dplyr) # Useful package for wrangling data
+
+zxy <- zxy %>%
   group_by(tag_id) %>%
-  mutate(distance = (sqrt((x_pos - lag(x_pos))^2 + (y_pos - lag(y_pos))^2)))
+  mutate(seconds = round(as.numeric(timestamp - min(timestamp)), digits = 2),
+         diffSeconds = seconds - lag(seconds))
+
+signalDisruptions <- which(zxy$diffSeconds > 0.06)
+
+kable(zxy[signalDisruptions,] %>%
+  select(tag_id, diffSeconds) %>%
+  filter(tag_id == 1), caption = "Instances of signal distrubtions for tag 1. Difference in seconds since last measurement")
+
+kable(zxy[signalDisruptions,] %>%
+  group_by(tag_id) %>%
+  summarise("Data loss" = sum(diffSeconds/60)), caption = "Total data loss for each tag in minutes")
 ```
+
+As seen above for tag #1 there's not a whole lot of signal distruptions. However, when the signal first is lost it's gone for an extended period. So how do we cope with this?
+
+### Resampling and interpolating 
+An easy way to get the data into the desired frequency is to resample it. But, this will also create missing values in places where there were no data to begin with such as during long stretches with no signal. To deal with this we also have to interpolate (or fill in) the missing values at this new frequency. Fortunately, with a slight tweak of the soccerResample function from Joe Gallaghers *soccermatics* package this is easily achievable. Also, an important thing to notice is that we're not resampling the original frequency of 20Hz but rather downsampling to 10Hz.            
+
+```{r}
+library(dplyr)
+library(zoo)
+library(xts)
+library(ggplot2)
+library(plyr)
+
+soccerResample <- function(dat, r = 10, x = "x_pos", y = "y_pos", timestamp = "timestamp", id = "tag_id") {
+  
+  dat$x_pos <- dat[,x]
+  dat$y_pos <- dat[,y]
+  dat$timestamp <- dat[,timestamp]
+  dat$tag_id <- dat[,id]
+  
+   # create new time index 
+  time.index <- seq(min(dat$timestamp), max(dat$timestamp), by = as.difftime(1/r, units='secs'))
+  
+    # remove ALL rows that have duplicated timestamps
+  dat <- dat %>% 
+    group_by(tag_id) %>% 
+    filter(!(duplicated(timestamp) | duplicated(timestamp, fromLast = TRUE))) %>% 
+    ungroup()
+  
+  # resample and interpolate for each id
+  dat.proc <- lapply(unique(dat$tag_id), function(x) {
+    
+    #subset
+    ss <- dat[dat$tag_id == x,]
+    
+    # convert data to xts object
+    ss.xts <- xts(ss %>% select(-timestamp), ss$timestamp)
+    
+    # join to time index
+    ss.join <- merge(ss.xts, time.index, all=T) %>% 
+      ggplot2::fortify() %>% 
+      rename_at(vars(Index),~"timestamp")
+    
+    # linear interpolatation of x,y-coords with omission of leading / lagging NAs; constant interpolation of other variables
+    ss.join %>% 
+      mutate_at(vars(-one_of("timestamp", "x_pos", "y_pos")), function(x) na.approx(x, method = "constant", na.rm=F)) %>%
+      mutate_at(vars(one_of("x_pos", "y_pos")), function(x) na.approx(x, na.rm=F)) %>% 
+      filter(timestamp %in% time.index)
+    
+  }) %>% 
+    plyr::rbind.fill()
+  
+  # generate frame variable
+  time.index2 <- data.frame(timestamp = time.index, frame = 1:length(time.index))
+  dat.proc <- left_join(dat.proc, time.index2, by = "timestamp")
+  
+  return(dat.proc)
+}
+
+zxy10hz <- soccerResample(zxy, r = 10)
+```
+
+
+
+```{r}
+
+# Try calculating distance and speed from resampled data
+
+butter1 <- butter(1, 0.1, type = "low", plane = "z")
+
+
+zxy.resampled <- zxy.resampled[complete.cases(zxy.resampled),]
+
+zxy.resampled <- zxy.resampled %>%
+  arrange(tag_id) %>%
+  group_by(tag_id) %>%
+  mutate(smoothX = signal::sgolayfilt(x_pos, p = 3, n = 85),
+         smoothY = signal::sgolayfilt(x_pos, p = 3, n = 85),
+         distanceSG = sqrt((smoothX - lag(smoothX))^2 + (smoothY - lag(smoothY))^2),
+         distanceUnfiltered = sqrt((x_pos - lag(x_pos))^2 + (y_pos - lag(y_pos))^2),
+         distanceButter = c(NA, NA, signal::filter(butter1, distanceUnfiltered)),
+         seconds = as.numeric(t - min(t)),
+         minutes = seconds/60,
+         speedUnfiltered = distanceUnfiltered/(seconds - lag(seconds)),
+         speedSG = distanceSG/(seconds - lag(seconds)),
+         speedSmoothed = signal::filter(butter2, speed),
+         acceleration = (speedSmoothed - dplyr::lag(speedSmoothed)) / (seconds - dplyr::lag(seconds)),
+         accelerationSG = (speedSG - dplyr::lag(speedSG)) / (seconds - dplyr::lag(seconds)))
+
+summary(zxy.resampled$distanceUnfiltered)
+summary(zxy.resampled$distanceSG)
+summary(zxy.resampled$distanceButter)
+hist(zxy.resampled$distanceSG, breaks = 50)
+
+
+summary(zxy.resampled$speed)
+summary(zxy.resampled$speedSG)
+summary(zxy.resampled$speedUnfiltered)
+summary(zxy.resampled$speedSmoothed)
+
+summary(zxy.resampled$acceleration)
+summary(zxy.resampled$accelerationSG)
+
+
+
+
+zxy.results <- zxy.resampled[complete.cases(zxy.resampled),] %>%
+  group_by(tag_id) %>%
+  summarise(accelerations = counter(na.omit(accelerationSG), 2, t, 0.5), 
+            decelerations = counter(na.omit(accelerationSG), -2, t, 0.5),
+            sprints = counter(speedSG, 7, t, 1)) %>%
+  dplyr::filter(!tag_id %in% c(3,6,11,12))
+
+zxy.results
+
+```
+
+
 
 ### Filtering/smoothing 
 A lot of metrics are derivatives of either speed or velocity. It is therefore useful to check the data for noise and outliers. Examine the "speed" column by first plotting a histogram and then summarising the data:
-```{r}
-hist(df$speed, breaks = 50)
-summary(df$speed)
+```{r warning=FALSE}
+zxy <- zxy %>%
+  arrange(tag_id) %>%
+  group_by(tag_id) %>%
+  mutate(distanceUnfiltered = sqrt((x_pos - lag(x_pos))^2 + (y_pos - lag(y_pos))^2),
+         speedUnfiltered = distanceUnfiltered/(seconds - lag(seconds)))
+         
+View(zxy[zxy$speedUnfiltered < 0,])
+
+zxy <- zxy[complete.cases(zxy),]
+
+summary(zxy$distanceUnfiltered)
+summary(zxy$speed)
+summary(zxy$speedUnfiltered)
+
+
+outliers <- which(zxy$speedUnfiltered > 10)
+View(zxy[zxy$speedUnfiltered > 10,])
+  
+zxy <- zxy %>%
+  group_by(tag_id) %>%
+  mutate(changeDist = ifelse(distanceUnfiltered == 0, 0, 1))
+
+changePoints <- c(1+which(diff(zxy$changeDist)!=0))
+
+outliers2 <- outliers[!outliers %in% changePoints]
+outliers3 <- outliers[outliers %in% changePoints]
+
+View(zxy[outliers3,])  
+
+zxy <- zxy[-outliers3,]
+
+hist(zxy$distanceUnfiltered, breaks = 500)
+
+View(zxy[zxy$speedUnfiltered > 10,])
+
+zxy <- zxy[zxy$distanceUnfiltered > 0,]
+zxy <- zxy[zxy$speedUnfiltered > 0,]
+
+### Smooth speed
+bf1 <- butter(1, 0.06, type = "low", plane = "z")
+
+zxy <- zxy %>%
+  group_by(tag_id) %>%
+  mutate(speedSmoothed = signal::filter(bf1, speedUnfiltered))
+       
+         
+summary(zxy$speedUnfiltered)
+summary(zxy$speedSmoothed)
+
+tag1 <- zxy %>%
+  filter(tag_id == 1)
+
+
+plot(tag1$seconds, tag1$distanceUnfiltered, type = "l") +
+  lines(tag1$seconds, tag1$distanceSmoothed, col = "blue")
+
+plot(tag1$seconds, tag1$speedUnfiltered, type = "l") +
+  lines(tag1$seconds, tag1$speedSmoothed, col = "blue")
 ```
 The histogram shows a lot of outliers on the far left side, while the highest speed is recorded at 11.31 m/s or 40.7 km/h. This is highly unlikely, and should be closer to 10 m/s. 
 Remove all values with "speed == 0", and then run the speed column through a low-pass filter as such: 
 ```{r warning=FALSE}
-df <- df[df$speed > 0,]
+zxy <- zxy[df$speed > 0,]
 
 bf1 <- butter(1, 0.06, type = "low", plane = "z")
-df <- df %>%
+zxy <- zxy %>%
   group_by(tag_id) %>%
-  mutate(speedSmoothed = signal::filter(bf1, speed))
+  mutate(speedSmoothed = signal::filter(bf1, speedUnfiltered))
 
-summary(df$speedSmoothed)
-hist(df$speedSmoothed, breaks = 50)
+summary(zxy$speedSmoothed)
+hist(zxy$speedSmoothed, breaks = 50)
 ```
 
 ### Total HI distance and total sprint distance
 
 Now to calculate the total HI and sprint distance, do the following:
 ```{r}
-df <- df %>%
+zxy <- zxy %>%
   group_by(tag_id) %>%
-  mutate(hir_distance = (cumsum(ifelse(speedSmoothed >=5.5 & speedSmoothed <= 7, distance, 0))),
-         sprint_distance = (cumsum(ifelse(speedSmoothed > 7, distance, 0))))
+  mutate(hir_distance = (cumsum(ifelse(speedSmoothed >=5.5 & speedSmoothed <= 7, distanceUnfiltered, 0))),
+         sprint_distance = (cumsum(ifelse(speedSmoothed > 7, distanceUnfiltered, 0))))
 
-df %>%
+zxy %>%
   group_by(tag_id) %>%
   summarise(TotalDistance = max(total_distance),
             TotalHIRDistance = max(hir_distance),
             TotalSprintDistance = max(sprint_distance)) %>%
-  dplyr::filter(!tag_id %in% c(3,6,11))
-              
+  dplyr::filter(!tag_id %in% c(3,6,11,12))
+
+
 ```
 
 ### Accelerations and decelerations
@@ -83,13 +290,13 @@ Next, to calculate accelerations and decelerations, do the following:
 ```{r warning=FALSE}
 bf2 <- butter(1, 0.03, "low", "z")
 
-df <- df %>%
+zxy <- zxy %>%
   group_by(tag_id) %>%
-  mutate(acceleration = c(NA, diff(speedSmoothed)) / c(NA, diff(timestamp)),
+  mutate(acceleration = (speedSmoothed - dplyr::lag(speedSmoothed)) / (seconds - dplyr::lag(seconds)),
          accelerationSmoothed = c(NA, NA, signal::filter(bf2, acceleration)))
 
-summary(df$accelerationSmoothed)
-hist(df$accelerationSmoothed, breaks = 50)
+summary(zxy$accelerationSmoothed)
+hist(zxy$accelerationSmoothed, breaks = 50)
 ```
 
 
@@ -124,12 +331,12 @@ counter <- function(metric, threshold, timestamp, timeThreshold) {
   return(sum(metricTimeDiff > timeThreshold))
 }
 
-df %>%
+zxy %>%
   group_by(tag_id) %>%
   summarise(accelerations = counter(na.omit(accelerationSmoothed), 2, timestamp, 0.5), 
             decelerations = counter(na.omit(accelerationSmoothed), -2, timestamp, 0.5),
             sprints = counter(speedSmoothed, 7, timestamp, 1)) %>%
-  dplyr::filter(!tag_id %in% c(3,6,11))
+  dplyr::filter(!tag_id %in% c(3,6,11,12))
 ```
 
 ### Work rate
@@ -168,7 +375,7 @@ metricDistance <- function(metric, metricThreshold, timestamp, distance, timeThr
   return(sum(metricDistDiff[metricTimeDiff >= timeThreshold])) 
 }
 
-df %>%
+zxy %>%
   group_by(tag_id) %>%
   summarise(accelDist = metricDistance(na.omit(accelerationSmoothed), 2, timestamp, total_distance, 0.5),
             decelDist = metricDistance(na.omit(accelerationSmoothed), -2, timestamp, total_distance, 0.5),
@@ -211,7 +418,7 @@ sprintDistance <- function(speed, speedThreshold, timestamp, distance, timeThres
   return(sum(sprintDistDiff[sprintTimeDiff > timeThreshold]))
 }
 
-df %>%
+zxy %>%
   group_by(tag_id) %>%
   summarise(sprintMeters1_5 = sprintDistance(speedSmoothed, 7, timestamp, total_distance, 0, 1, 5),
             sprintMeters6_10 = sprintDistance(speedSmoothed, 7, timestamp, total_distance, 0, 6, 10),
@@ -222,7 +429,7 @@ df %>%
             sprintMeters31_35 = sprintDistance(speedSmoothed, 7, timestamp, total_distance, 0, 31, 35),
             sprintMeters36_40 = sprintDistance(speedSmoothed, 7, timestamp, total_distance, 0, 36, 40),
             sprintMeters41plus = sprintDistance(speedSmoothed, 7, timestamp, total_distance, 0, 41, 80)) %>%
-  dplyr::filter(!tag_id %in% c(3,6,11))
+  dplyr::filter(!tag_id %in% c(3,6,11,12))
 ```
 
 ###Metabolic power
@@ -234,34 +441,55 @@ rad2deg <- function(rad) {(rad * 180) / (pi)}
 
 bf3 <- butter(1, 0.01, "low", "z")
 
-df <- df %>%
+zxy <- zxy %>%
   group_by(tag_id) %>%
   mutate(alpha = rad2deg(atan(9.81/accelerationSmoothed)),
-         g = sqrt(accelerationSmoothed^2 + 9.81^2),
+         g = sqrt((accelerationSmoothed^2) + (9.81^2)),
          equivilantSlope = tan(0.5 * pi - atan(9.81/accelerationSmoothed)),
          equivilantMass = g/9.81,
          energyCost = ifelse(accelerationSmoothed == 0, 3.6*1.29, (155.4*equivilantSlope^5 - 30.4*equivilantSlope^4 - 43.3*equivilantSlope^3 + 46.3*equivilantSlope^2 + 19.5*equivilantSlope + 3.6)*equivilantMass*1.29),
          metabolicPower = energyCost*speedSmoothed,
          metabolicPowerSmoothed = c(NA, NA, NA, signal::filter(bf3, metabolicPower)))
 
-df$metabolicPowerSmoothed[is.na(df$metabolicPowerSmoothed)] <- 0 
+zxy$metabolicPower[is.na(zxy$metabolicPower)] <- 0 
+zxy$metabolicPowerSmoothed[is.na(zxy$metabolicPowerSmoothed)] <- 0 
 
-df <- df %>%
+zxy <- zxy %>%
   group_by(tag_id) %>%
-  mutate(HighPowerDistance = cumsum(ifelse(metabolicPowerSmoothed > 20 & metabolicPowerSmoothed < 35, distance, 0)),
-         ElevatedPowerDistance = cumsum(ifelse(metabolicPowerSmoothed > 35 & metabolicPowerSmoothed < 55, distance, 0)),
-         MaxPowerDistance = cumsum(ifelse(metabolicPowerSmoothed > 55, distance, 0)))
+  mutate(HighPowerDistance = cumsum(ifelse(metabolicPower > 20 & metabolicPower < 35, distanceUnfiltered, 0)),
+         ElevatedPowerDistance = cumsum(ifelse(metabolicPower > 35 & metabolicPower < 55, distanceUnfiltered, 0)),
+         MaxPowerDistance = cumsum(ifelse(metabolicPower > 55, distanceUnfiltered, 0)),
+         HighPowerTIZ = cumsum(ifelse(metabolicPower > 20 & metabolicPower < 35, seconds - lag(seconds), 0)),
+         ElevatedPowerTIZ = cumsum(ifelse(metabolicPower > 35 & metabolicPower < 55, seconds - lag(seconds), 0)),
+         MaxPowerTIZ = cumsum(ifelse(metabolicPower > 55, seconds - lag(seconds), 0)))
+
+zxy <- zxy %>%
+  group_by(tag_id) %>%
+  mutate(HighPowerDistance = cumsum(ifelse(metabolicPowerSmoothed > 20 & metabolicPowerSmoothed < 35, distanceUnfiltered, 0)),
+         ElevatedPowerDistance = cumsum(ifelse(metabolicPowerSmoothed > 35 & metabolicPowerSmoothed < 55, distanceUnfiltered, 0)),
+         MaxPowerDistance = cumsum(ifelse(metabolicPowerSmoothed > 55, distanceUnfiltered, 0)),
+         HighPowerTIZ = cumsum(ifelse(metabolicPowerSmoothed > 20 & metabolicPowerSmoothed < 35, seconds - lag(seconds), 0)),
+         ElevatedPowerTIZ = cumsum(ifelse(metabolicPowerSmoothed > 35 & metabolicPowerSmoothed < 55, seconds - lag(seconds), 0)),
+         MaxPowerTIZ = cumsum(ifelse(metabolicPowerSmoothed > 55, seconds - lag(seconds), 0)))
          
 
-
-df %>%
+zxy %>%
   group_by(tag_id) %>%
   summarise(HighPowerDistance = max(HighPowerDistance),
             ElevatedPowerDistance = max(ElevatedPowerDistance),
-            MaxPowerDistance = max(MaxPowerDistance)) %>%
-  dplyr::filter(!tag_id %in% c(3,6,11))
+            MaxPowerDistance = max(MaxPowerDistance),
+            HighPowerTIZ = max(HighPowerTIZ),
+            ElevatedPowerTIZ = max(ElevatedPowerTIZ),
+            MaxPowerTIZ = max(MaxPowerTIZ)) %>%
+  dplyr::filter(!tag_id %in% c(3,6,11,12))
 
 ```
 
 ## References
 
+```{r}
+Game1Home <- read.csv("~/sample-data-master/data/Sample_Game_1/Sample_Game_1_RawTrackingData_Home_Team.csv", stringsAsFactors=FALSE)
+
+teamName <- names(Game1Home[4])
+
+```

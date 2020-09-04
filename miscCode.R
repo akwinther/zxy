@@ -1,3 +1,23 @@
+
+calcSSE <- function(span) {
+  loessResults <- loess(tag1$x_pos ~ tag1$seconds, data=tag1, span=span)
+  res <- loessResults$residuals
+  sse <- sum(res^2)  
+  return(sse)
+}
+
+optimalSpan <- optim(par =c(0.5), calcSSE, method = "SANN")
+
+calcSSE <- function(y, x, df, span) {
+  loessResults <- loess(y ~ x, data=df, span=span)
+  res <- loessResults$residuals
+  sse <- sum(res^2)  
+  return(sse)
+}
+
+optimalSpan <- optim(par=c(tag1$x_pos, tag1$seconds, tag1, 0.5), calcSSE, method="SANN")
+
+
 #specific player datasets
 player1 <- df[df$tag_id == 1,]
 
