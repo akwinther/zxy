@@ -1,0 +1,64 @@
+---
+title: "StatSport_cleaner"
+author: "Andreas K. Winther"
+date: "5 11 2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(reticulate)
+```
+
+
+```{python}
+import pandas as pd
+import scipy.signal as signal
+
+filepath = "C:/Users/awi027/FFC Dropbox/vaalerenga_raw_extended/Mars2020/14 March 2020-RawDataExtended/2020-03-14-Andrine-Entire Session.csv"
+
+rawdata = pd.read_csv(filepath)
+
+CONT_VARS = ["Speed (m/s)", "Heart Rate (bpm)"]
+CONST_VARS = [" Player Display Name", "Hdop", "No. of Satellites"]
+DROP_VARS = ["Instantaneous Acceleration Impulse", "Lat", "Lon", "Hacc", "Quality of Signal", "Accl X", "Accl Y", "Accl Z", "Gyro X", "Gyro Y", "Gyro Z"]
+
+rawdata.drop(DROP_VARS, axis = 1, inplace = True) 
+
+# Filter data
+rawdata = rawdata.drop_duplicates(subset = ["Time"])
+rawdata = rawdata[rawdata["Hdop"] < 2]
+rawdata = rawdata[rawdata["No. of Satellites"] > 8]
+rawdata = rawdata[rawdata["Speed (m/s)"] < 10]
+
+rawdata['Time'] = pd.to_datetime(rawdata['Time'], format = "%H:%M:%S.%f")
+
+# Calculate data loss
+difftime = rawdata.Time.diff().dt.total_seconds()
+signal_distrubtion = difftime[difftime > 0.1]
+sum(signal_distrubtion / 60)
+
+# Resample data if data loss
+index = pd.date_range(min(rawdata["Time"]), max(rawdata["Time"]), freq = "0.1S")
+rawdata = rawdata.set_index("Time").reindex(index)
+rawdata[CONT_VARS] = rawdata[CONT_VARS].interpolate(method = "linear")
+rawdata[CONST_VARS] = rawdata[CONST_VARS].fillna(method = "ffill")
+
+# Create time variables
+rawdata["Time"] = index
+rawdata["Time elapsed"] = rawdata["Time"] - rawdata["Time"].iloc[0]
+rawdata["Time elapsed"] = rawdata["Time elapsed"].dt.total_seconds()
+
+# Smoot speed variable
+rawdata["Smooth_Speed"] = signal.savgol_filter(rawdata["Speed (m/s)"], window_length = 7, polyorder = 1)
+
+rawdata = rawdata.set_index(pd.Series(range(0,len(rawdata["Smooth_Speed"]))))
+
+```
